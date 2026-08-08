@@ -1,0 +1,14 @@
+# Core scientific stack
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# Ollama Python client (local LLM — free, no API key needed)
+# Docs: https://github.com/ollama/ollama-python
+ollama>=0.2.0
+
+# Excel export (optional — used in visualisation utilities)
+openpyxl>=3.1.0
+
+# Coloured console logging (optional but recommended)
+colorlog>=6.7.0
