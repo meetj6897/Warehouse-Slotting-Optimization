@@ -36,6 +36,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+
 # ── Make project root importable when running as a script ─────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -85,6 +87,45 @@ def parse_args() -> argparse.Namespace:
 
 # ── Main experiment ───────────────────────────────────────────────────────────
 
+def plot_run_summary(
+    best_history: list,
+    mutation_history: list,
+    elitism_history: list,
+    pop_history: list,
+    output_path: str,
+) -> None:
+    """Save a small debugging chart showing fitness reduction and parameter changes."""
+    generations = list(range(len(best_history)))
+    if not generations:
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+    axes[0].plot(generations, best_history, color="tab:blue", marker="o", linewidth=2)
+    axes[0].set_ylabel("Best fitness")
+    axes[0].set_title("GA loss curve (lower is better)")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(generations, mutation_history, color="tab:orange", marker="o", linewidth=2)
+    axes[1].set_ylabel("Mutation rate")
+    axes[1].set_title("Mutation rate over generations")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(generations, pop_history, color="tab:green", marker="o", linewidth=2, label="pop_size")
+    axes[2].plot(generations, elitism_history, color="tab:red", marker="s", linewidth=2, label="elitism_count")
+    axes[2].set_ylabel("Population / elitism")
+    axes[2].set_xlabel("Generation")
+    axes[2].set_title("Population and elitism changes over generations")
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Run summary plot saved → %s", output_path)
+
+
 def main() -> None:
     args   = parse_args()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -119,6 +160,10 @@ def main() -> None:
         elitism_count = args.elitism,
     )
     ga_state = initialise_ga(params, sku_location_3d)
+    best_history = []
+    mutation_history = []
+    elitism_history = []
+    pop_history = []
     logger.info("GA initialised | pop=%d | μ=%.3f | elitism=%d",
                 params.pop_size, params.mutation_rate, params.elitism_count)
 
@@ -167,6 +212,10 @@ def main() -> None:
                 mutation_rate = r.mutation_rate,
                 elapsed       = r.elapsed_seconds,
             )
+            best_history.append(r.best_fitness)
+            mutation_history.append(r.mutation_rate)
+            elitism_history.append(r.elitism_count)
+            pop_history.append(r.population_size)
 
         current_gen += interval
         monitor.update(results)
@@ -241,6 +290,9 @@ def main() -> None:
     print(f"\n  ✓  Best fitness  : {ga_state.best_distance:,.2f}")
     print(f"  ✓  Best route    : {(ga_state.best_route or [])[:10]} …")
     print(f"  ✓  Log           : {log_path}\n")
+
+    summary_plot_path = Path(log_path).with_name(f"{run_id}_summary.png")
+    plot_run_summary(best_history, mutation_history, elitism_history, pop_history, str(summary_plot_path))
 
     return ga_state.best_distance, ga_state.best_route
 

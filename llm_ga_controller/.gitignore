@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment secrets
+.env
+
+# Logs and outputs
+logs/
+*.log
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
