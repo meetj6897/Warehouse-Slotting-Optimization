@@ -22,19 +22,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-import ollama
+import requests
 
 from config.settings import (
+    OPENROUTER_API_KEY,
+    OPENROUTER_BASE_URL,
     LLM_FALLBACK_MODEL,
     LLM_MAX_TOKENS,
     LLM_MODEL,
     LLM_TEMPERATURE,
-    OLLAMA_HOST,
 )
 from llm.prompt_builder import build_user_prompt, get_system_prompt
 from utils.state_monitor import OptimisationState
@@ -110,8 +112,11 @@ def _extract_json(text: str) -> Dict[str, Any]:
       - Markdown code fences  ```json ... ```
       - Leading / trailing prose around the JSON object
     """
+    if text is None or not str(text).strip():
+        raise ValueError("LLM response was empty or None.")
+
     # 1. Strip chain-of-thought reasoning block (deepseek-r1)
-    cleaned = _strip_think_tags(text)
+    cleaned = _strip_think_tags(str(text))
 
     # 2. Strip markdown fences
     cleaned = re.sub(r"```(?:json)?", "", cleaned).strip()
@@ -138,128 +143,127 @@ def _extract_json(text: str) -> Dict[str, Any]:
     )
 
 
-# ── Model availability check ──────────────────────────────────────────────────
-
-def _resolve_model(preferred: str, fallback: str) -> str:
-    """Return the first model that is available locally; warn if falling back."""
-    try:
-        client = ollama.Client(host=OLLAMA_HOST)
-        available = {m["name"] for m in client.list()["models"]}
-        # Ollama stores names like "deepseek-r1:8b" or "deepseek-r1:8b-..."
-        for model in (preferred, fallback):
-            if any(model in name for name in available):
-                return model
-        logger.warning(
-            "Neither '%s' nor '%s' found locally. "
-            "Run: ollama pull %s",
-            preferred, fallback, preferred,
-        )
-        return preferred   # let the call fail with a clear error from Ollama
-    except Exception as e:
-        logger.warning("Could not list Ollama models (%s). Using '%s'.", e, preferred)
-        return preferred
+# ── Legacy OpenRouter model selection / fallback ───────────────────────────
+# def _resolve_model(preferred: str, fallback: str) -> str:
+#     """Prefer the configured OpenRouter model, but allow a fallback."""
+#     return preferred if preferred else fallback
 
 
-# ── Ollama LLM Agent ──────────────────────────────────────────────────────────
+# ── Active OpenRouter LLM Agent ──────────────────────────────────────────────
 
 class LLMAgent:
-    """Sends prompts to a local Ollama model and parses structured responses."""
+    """Sends prompts to the configured OpenRouter model and parses structured responses."""
 
     def __init__(self):
-        self.client        = ollama.Client(host=OLLAMA_HOST)
-        self.model         = _resolve_model(LLM_MODEL, LLM_FALLBACK_MODEL)
+        self.model = LLM_MODEL or LLM_FALLBACK_MODEL
+        self.api_key = OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")
+        self.base_url = OPENROUTER_BASE_URL
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost",
+            "X-Title": "Warehouse GA LLM Controller",
+        }
         self.system_prompt = get_system_prompt()
-        logger.info("LLMAgent initialised | model=%s | host=%s", self.model, OLLAMA_HOST)
+        logger.info("LLMAgent initialised | model=%s | provider=openrouter", self.model)
 
     def query(self, opt_state: OptimisationState) -> LLMRecommendation:
-        """Query the local LLM with the current optimisation state.
+        """Query the active OpenRouter model with the current optimisation state.
 
         Retries up to MAX_RETRIES times on connection errors or bad JSON.
         Returns a no-change recommendation if all retries are exhausted.
         """
-        user_prompt = build_user_prompt(opt_state)
+        try:
+            from memory.experience_log import ExperienceLog
+            prior_recommendations = ExperienceLog().load_successful_interventions(max_records=5)
+        except Exception as exc:  # pragma: no cover - optional historical context
+            prior_recommendations = []
+            logger.debug("No prior intervention history loaded: %s", exc)
+
+        user_prompt = build_user_prompt(opt_state, prior_recommendations=prior_recommendations)
         logger.debug("User prompt (%d chars):\n%s", len(user_prompt), user_prompt)
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                logger.debug("Ollama query attempt %d/%d | model=%s",
+                logger.debug("OpenRouter query attempt %d/%d | model=%s",
                              attempt, MAX_RETRIES, self.model)
 
-                response = self.client.chat(
-                    model   = self.model,
-                    options = {
-                        "temperature": LLM_TEMPERATURE,
-                        "num_predict": LLM_MAX_TOKENS,
-                    },
-                    messages = [
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                )
+                if not self.api_key:
+                    raise ValueError("OPENROUTER_API_KEY is missing. Add it to your environment or .env file.")
 
-                raw_text = response["message"]["content"]
-                logger.debug("Raw response (%d chars):\n%s", len(raw_text), raw_text[:800])
+                payload = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": LLM_TEMPERATURE,
+                    "max_tokens": LLM_MAX_TOKENS,
+                }
+
+                response = requests.post(
+                    self.base_url,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=120,
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                raw_text = data["choices"][0]["message"]["content"]
+                if raw_text is None or not str(raw_text).strip():
+                    raise ValueError("OpenRouter returned an empty message payload.")
+
+                logger.debug("Raw response (%d chars):\n%s", len(str(raw_text)), str(raw_text)[:800])
 
                 parsed = _extract_json(raw_text)
-                rec    = parsed.get("recommendations", {})
+                rec = parsed.get("recommendations", {})
 
                 recommendation = LLMRecommendation(
-                    phase_assessment  = parsed.get("phase_assessment", "unknown"),
-                    root_cause        = parsed.get("root_cause", ""),
-                    mutation_rate     = rec.get("mutation_rate"),
-                    pop_size          = rec.get("pop_size"),
-                    elitism_count     = rec.get("elitism_count"),
-                    crossover_op      = rec.get("crossover_op"),
-                    mutation_op       = rec.get("mutation_op"),
-                    reasoning         = parsed.get("reasoning", ""),
-                    expected_outcome  = parsed.get("expected_outcome", ""),
-                    confidence        = float(parsed.get("confidence", 0.5)),
-                    raw_response      = raw_text,
-                    model_used        = self.model,
-                    prompt_tokens     = response.get("prompt_eval_count", 0),
-                    completion_tokens = response.get("eval_count", 0),
+                    phase_assessment=parsed.get("phase_assessment", "unknown"),
+                    root_cause=parsed.get("root_cause", ""),
+                    mutation_rate=rec.get("mutation_rate"),
+                    pop_size=rec.get("pop_size"),
+                    elitism_count=rec.get("elitism_count"),
+                    crossover_op=rec.get("crossover_op"),
+                    mutation_op=rec.get("mutation_op"),
+                    reasoning=parsed.get("reasoning", ""),
+                    expected_outcome=parsed.get("expected_outcome", ""),
+                    confidence=float(parsed.get("confidence", 0.5)),
+                    raw_response=str(raw_text),
+                    model_used=self.model,
+                    prompt_tokens=0,
+                    completion_tokens=0,
                 )
 
                 logger.info(
-                    "LLM decision | phase=%-25s | confidence=%.0f%% | changes=%s | "
-                    "tokens: %d in / %d out",
+                    "LLM decision | phase=%-25s | confidence=%.0f%% | changes=%s",
                     recommendation.phase_assessment,
                     recommendation.confidence * 100,
                     recommendation.has_changes(),
-                    recommendation.prompt_tokens,
-                    recommendation.completion_tokens,
                 )
                 return recommendation
 
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning("JSON parse error on attempt %d: %s", attempt, e)
-            except ollama.ResponseError as e:
-                logger.warning("Ollama response error on attempt %d: %s", attempt, e)
-                if "model" in str(e).lower() and "not found" in str(e).lower():
-                    logger.error(
-                        "Model '%s' is not pulled. Run:  ollama pull %s",
-                        self.model, self.model,
-                    )
-                    break   # no point retrying a missing model
             except Exception as e:
-                logger.warning("Unexpected error on attempt %d: %s", attempt, e)
+                logger.warning("OpenRouter request error on attempt %d: %s", attempt, e)
 
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
 
-        # All retries exhausted — keep current params
         logger.error("LLM query failed after %d attempts. Keeping current params.", MAX_RETRIES)
         return LLMRecommendation(
-            phase_assessment = "unknown",
-            root_cause       = "LLM query failed — keeping current parameters.",
-            mutation_rate    = None,
-            pop_size         = None,
-            elitism_count    = None,
-            crossover_op     = None,
-            mutation_op      = None,
-            reasoning        = "All LLM query attempts failed.",
-            expected_outcome = "No change.",
-            confidence       = 0.0,
-            raw_response     = "",
-            model_used       = self.model,
+            phase_assessment="unknown",
+            root_cause="LLM query failed — keeping current parameters.",
+            mutation_rate=None,
+            pop_size=None,
+            elitism_count=None,
+            crossover_op=None,
+            mutation_op=None,
+            reasoning="All LLM query attempts failed.",
+            expected_outcome="No change.",
+            confidence=0.0,
+            raw_response="",
+            model_used=self.model,
         )
