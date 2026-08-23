@@ -118,13 +118,19 @@ HISTORY — LAST $window_size GENERATIONS
 $history_table
 
 ════════════════════════════════════════════════════════════════════════════════
+PREVIOUS SUCCESSFUL LLM INTERVENTIONS
+════════════════════════════════════════════════════════════════════════════════
+$prior_interventions
+
+════════════════════════════════════════════════════════════════════════════════
 YOUR TASKS
 ════════════════════════════════════════════════════════════════════════════════
 1. Identify the current optimisation phase.
 2. Explain the root cause of any performance issue.
 3. Recommend parameter changes (or confirm current settings are appropriate).
-4. Predict the expected outcome of your recommendation.
-5. Provide a confidence score.
+4. Use the previous successful interventions as historical guidance.
+5. Predict the expected outcome of your recommendation.
+6. Provide a confidence score.
 
 Return ONLY the JSON object described in the system prompt.
 """)
@@ -153,9 +159,35 @@ def _format_history_table(history_window: list) -> str:
     return "\n".join(rows)
 
 
-def build_user_prompt(state: OptimisationState) -> str:
+def _format_prior_interventions(prior_recommendations: list) -> str:
+    """Render past successful interventions as compact examples for the LLM."""
+    if not prior_recommendations:
+        return "  (no prior successful interventions available)"
+
+    lines = []
+    for rec in prior_recommendations:
+        changes = rec.get("changes_accepted") or rec.get("changes") or []
+        if isinstance(changes, dict):
+            changes = [f"{k}={v}" for k, v in changes.items() if v is not None]
+        lines.append(
+            "  - Gen {generation}: confidence={confidence:.2f}, "
+            "phase={phase}, root_cause={root_cause}, "
+            "accepted_changes={changes}, outcome={outcome}".format(
+                generation=rec.get("generation", "?"),
+                confidence=float(rec.get("confidence", 0.0)),
+                phase=rec.get("phase_assessment", "unknown"),
+                root_cause=rec.get("root_cause", ""),
+                changes=changes,
+                outcome=rec.get("outcome_label", "unknown"),
+            )
+        )
+    return "\n".join(lines)
+
+
+def build_user_prompt(state: OptimisationState, prior_recommendations: list | None = None) -> str:
     """Assemble the user-facing prompt from the current optimisation state."""
     history_table = _format_history_table(state.history_window)
+    prior_interventions = _format_prior_interventions(prior_recommendations or [])
 
     return _USER_TEMPLATE.substitute(
         generation       = state.generation,
@@ -176,6 +208,7 @@ def build_user_prompt(state: OptimisationState) -> str:
         phase            = state.phase,
         runtime_seconds  = f"{state.runtime_seconds:.1f}",
         history_table    = history_table,
+        prior_interventions = prior_interventions,
     ).strip()
 
 
