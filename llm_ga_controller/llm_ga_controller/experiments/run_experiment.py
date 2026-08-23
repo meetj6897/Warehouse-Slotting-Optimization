@@ -37,11 +37,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # ── Make project root importable when running as a script ─────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.settings import GAParams, LLM_INTERVAL, LLM_HISTORY_WINDOW
+from config.settings import GAParams, LLM_INTERVAL, LLM_HISTORY_WINDOW, LLM_MODEL
 from ga.population import generate_reorder_rates, generate_orders
 from ga.runner import initialise_ga, run_ga_interval
 from ga.warehouse import build_location_dicts
@@ -65,10 +66,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="LLM-Guided Adaptive Meta-Controller for Warehouse GA"
     )
-    p.add_argument("--generations",   type=int,   default=200,    help="Total GA generations")
-    p.add_argument("--pop-size",      type=int,   default=200,    help="Initial population size")
-    p.add_argument("--mutation-rate", type=float, default=0.5,    help="Initial mutation rate")
-    p.add_argument("--elitism",       type=int,   default=20,     help="Elitism count")
+    p.add_argument("--generations",   type=int,   default=1500,   help="Total GA generations")
+    p.add_argument("--pop-size",      type=int,   default=100,    help="Initial population size")
+    p.add_argument("--mutation-rate", type=float, default=0.7,    help="Initial mutation rate")
+    p.add_argument("--elitism",       type=int,   default=10,     help="Elitism count")
     p.add_argument("--llm-interval",  type=int,   default=LLM_INTERVAL,
                    help="Consult LLM every N generations")
     p.add_argument("--history-window",type=int,   default=LLM_HISTORY_WINDOW,
@@ -126,6 +127,53 @@ def plot_run_summary(
     logger.info("Run summary plot saved → %s", output_path)
 
 
+def export_run_results_excel(
+    run_id: str,
+    best_history: list,
+    mutation_history: list,
+    elitism_history: list,
+    pop_history: list,
+    best_fitness: float,
+    best_route: list | None,
+    output_dir: str = "logs",
+) -> str:
+    """Save final GA run metrics to an Excel workbook for downstream review."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    excel_path = out_dir / f"{run_id}_results.xlsx"
+
+    df = pd.DataFrame({
+        "generation": list(range(1, len(best_history) + 1)),
+        "best_fitness": best_history,
+        "mutation_rate": mutation_history,
+        "elitism_count": elitism_history,
+        "population_size": pop_history,
+    })
+    df["best_fitness"] = pd.to_numeric(df["best_fitness"], errors="coerce")
+    df["mutation_rate"] = pd.to_numeric(df["mutation_rate"], errors="coerce")
+    df["elitism_count"] = pd.to_numeric(df["elitism_count"], errors="coerce")
+    df["population_size"] = pd.to_numeric(df["population_size"], errors="coerce")
+
+    final_summary = pd.DataFrame([
+        {
+            "run_id": run_id,
+            "best_fitness": best_fitness,
+            "best_route_preview": str(best_route[:20]) if best_route else "",
+            "total_generations": len(best_history),
+            "final_mutation_rate": mutation_history[-1] if mutation_history else None,
+            "final_elitism_count": elitism_history[-1] if elitism_history else None,
+            "final_population_size": pop_history[-1] if pop_history else None,
+        }
+    ])
+
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="GA_Results", index=False)
+        final_summary.to_excel(writer, sheet_name="Summary", index=False)
+
+    logger.info("Run results exported to Excel → %s", excel_path)
+    return str(excel_path)
+
+
 def main() -> None:
     args   = parse_args()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -179,7 +227,7 @@ def main() -> None:
         logger.info("LLM controller DISABLED — running plain GA baseline.")
     else:
         logger.info("LLM controller ENABLED — model=%s | interval=%d gens",
-                    "claude-sonnet-4-6", args.llm_interval)
+                    LLM_MODEL, args.llm_interval)
 
     # Tracks pending interventions waiting for outcome measurement
     pending_interventions = []   # list of (InterventionRecord, trigger_gen)
@@ -294,6 +342,18 @@ def main() -> None:
     summary_plot_path = Path(log_path).with_name(f"{run_id}_summary.png")
     plot_run_summary(best_history, mutation_history, elitism_history, pop_history, str(summary_plot_path))
 
+    excel_path = export_run_results_excel(
+        run_id=run_id,
+        best_history=best_history,
+        mutation_history=mutation_history,
+        elitism_history=elitism_history,
+        pop_history=pop_history,
+        best_fitness=ga_state.best_distance,
+        best_route=ga_state.best_route,
+        output_dir="logs",
+    )
+
+    print(f"  ✓  Excel export : {excel_path}\n")
     return ga_state.best_distance, ga_state.best_route
 
 

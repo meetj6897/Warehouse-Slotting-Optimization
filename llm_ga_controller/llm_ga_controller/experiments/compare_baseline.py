@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Baseline vs LLM-GA comparison")
-    p.add_argument("--generations",   type=int,   default=200)
-    p.add_argument("--pop-size",      type=int,   default=200)
-    p.add_argument("--mutation-rate", type=float, default=0.5)
+    p.add_argument("--generations",   type=int,   default=1500)
+    p.add_argument("--pop-size",      type=int,   default=100)
+    p.add_argument("--mutation-rate", type=float, default=0.7)
     p.add_argument("--llm-interval",  type=int,   default=LLM_INTERVAL)
     p.add_argument("--policy",        choices=["GZA", "W"], default="GZA")
     p.add_argument("--seed",          type=int,   default=30)

@@ -9,39 +9,61 @@ change the behaviour of the entire system — nothing else needs touching.
 """
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 
-# ── Ollama (local LLM — free, no API key needed) ─────────────────────────────
-#
-# Model choice: deepseek-r1:8b
-#   - Best reasoning quality at 8B parameters — uses chain-of-thought internally
-#   - Follows complex structured JSON instructions reliably
-#   - Runs on a laptop GPU (4-6 GB VRAM) or CPU (slower but works)
-#   - Ideal for the meta-controller which needs to reason about trends and
-#     produce valid JSON recommendations consistently
-#
-# Fallback: llama3.1:8b  (faster on CPU-only, slightly weaker reasoning)
-#
-# Setup (one-time):
-#   1. Install Ollama  →  https://ollama.com/download
-#   2. Pull the model  →  ollama pull deepseek-r1:8b
-#   3. Run the server  →  ollama serve          (stays running in background)
-#   4. Run the GA      →  python experiments/run_experiment.py
+# Load local secret values from the project root .env file.
+def _load_dotenv() -> None:
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        return
 
-OLLAMA_HOST:         str   = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-LLM_MODEL:           str   = "deepseek-r1:8b"   # primary
-LLM_FALLBACK_MODEL:  str   = "llama3.1:8b"       # fallback
-LLM_MAX_TOKENS:      int   = 1024
-LLM_TEMPERATURE:     float = 0.2   # low → deterministic, consistent JSON output
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
+
+# ── OpenRouter (active LLM API) ─────────────────────────────────────────────
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY_gpt4o", os.getenv("OPENROUTER_API_KEY", ""))
+OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1/chat/completions"
+LLM_MODEL:           str = "openai/gpt-4o"
+LLM_FALLBACK_MODEL:  str = "openai/gpt-4o-mini"
+LLM_MAX_TOKENS:      int = 1024
+LLM_TEMPERATURE:     float = 0.2  # low → deterministic, consistent JSON output
+
+# ---------------------------------------------------------------------------
+# Legacy Ollama configuration kept here as commented reference only.
+# ---------------------------------------------------------------------------
+# OLLAMA_HOST:         str   = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+# LLM_MODEL:           str   = "deepseek-r1:8b"
+# LLM_FALLBACK_MODEL:  str   = "llama3.1:8b"
+# LLM_MAX_TOKENS:      int   = 1024
+# LLM_TEMPERATURE:     float = 0.2
+
+# ---------------------------------------------------------------------------
+# Google Cloud configuration kept here as commented reference only.
+# ---------------------------------------------------------------------------
+# GCP_PROJECT_ID: str = os.getenv("GCP_PROJECT_ID", "project-fad3f647-9796-449e-a2e")
+# GCP_LOCATION: str = os.getenv("GCP_LOCATION", "us-central1")
+# GCP_MODEL: str = os.getenv("GCP_MODEL", "gemini-2.5-pro")
 
 
 # ── Warehouse Physical Parameters ────────────────────────────────────────────
 
+# Original warehouse-scale problem from the notebook.
+# 5 racks × 25 columns × 4 levels = 500 slot positions.
 NUM_SHELVES:    int   = 5
 NUM_LEVELS:     int   = 4
 NUM_COLUMNS:    int   = 25
+TOTAL_SLOT_CAPACITY: int = NUM_SHELVES * NUM_LEVELS * NUM_COLUMNS
 AISLE_LENGTH:   float = 25.0        # metres
 AISLE_SPACING:  float = 10.0        # centre-to-centre between rack rows (m)
 COLUMN_SPACING: float = 10.0        # distance between shelf columns (m)
@@ -65,10 +87,10 @@ class GAParams:
     means every generation automatically uses the current (possibly updated)
     values.
     """
-    pop_size:       int   = 200
-    generations:    int   = 200
-    mutation_rate:  float = 0.50
-    elitism_count:  int   = 20      # how many top chromosomes survive unchanged
+    pop_size:       int   = 100
+    generations:    int   = 1500
+    mutation_rate:  float = 0.70
+    elitism_count:  int   = 10      # how many top chromosomes survive unchanged
     crossover_op:   str   = "OX"    # "OX" | "PMX" | "CX"
     mutation_op:    str   = "swap"  # "swap" | "inversion" | "scramble"
 
